@@ -456,6 +456,62 @@ def render_prediction_views(result: PredictionResult, boundary: BoundaryResult) 
     )
 
 
+def render_pred_imt_statistics(boundary: BoundaryResult) -> None:
+    st.subheader("Thong so Carotid Intima Media Thickness cua prediction")
+    imt_values_um = pd.to_numeric(pd.Series(boundary.imt_um), errors="coerce").dropna()
+
+    if imt_values_um.empty:
+        st.warning("Khong co gia tri Carotid Intima Media Thickness hop le de tinh thong so.")
+        return
+
+    imt_values_px = pd.Series(
+        boundary.ma_px[boundary.column_index] - boundary.li_px[boundary.column_index],
+        dtype="float32",
+    ).dropna()
+
+    stats_df = pd.DataFrame(
+        [
+            {
+                "Thong so": "Mean Carotid Intima Media Thickness",
+                "Pixel": imt_values_px.mean(),
+                "Micrometer": imt_values_um.mean(),
+                "Millimeter": imt_values_um.mean() / 1000.0,
+            },
+            {
+                "Thong so": "Min Carotid Intima Media Thickness",
+                "Pixel": imt_values_px.min(),
+                "Micrometer": imt_values_um.min(),
+                "Millimeter": imt_values_um.min() / 1000.0,
+            },
+            {
+                "Thong so": "Max Carotid Intima Media Thickness",
+                "Pixel": imt_values_px.max(),
+                "Micrometer": imt_values_um.max(),
+                "Millimeter": imt_values_um.max() / 1000.0,
+            },
+            {
+                "Thong so": "Median Carotid Intima Media Thickness",
+                "Pixel": imt_values_px.median(),
+                "Micrometer": imt_values_um.median(),
+                "Millimeter": imt_values_um.median() / 1000.0,
+            },
+        ]
+    )
+    st.table(
+        stats_df.style.format(
+            {
+                "Pixel": "{:,.2f}",
+                "Micrometer": "{:,.2f}",
+                "Millimeter": "{:.4f}",
+            }
+        )
+    )
+    st.caption(
+        "Gia tri micrometer = Pixel x he so mm/pixel x 1000. "
+        "Neu Pixel lon, hay kiem tra lai mask prediction/threshold; neu Pixel hop ly nhung micrometer lon, hay kiem tra he so mm/pixel."
+    )
+
+
 def render_mae_section(result: PredictionResult, um_per_pixel: float) -> None:
     st.subheader("Mean absolute error")
     st.caption("Can upload ground truth mask de tinh sai so trung binh tuyet doi.")
@@ -579,6 +635,7 @@ def main() -> None:
         st.stop()
 
     render_prediction_views(result, boundary)
+    render_pred_imt_statistics(boundary)
     render_mae_section(result, um_per_pixel)
 
 
