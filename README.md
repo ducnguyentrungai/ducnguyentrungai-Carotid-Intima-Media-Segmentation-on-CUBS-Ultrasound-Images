@@ -6,16 +6,17 @@ Thu muc `src/` chua code tien xu ly du lieu, phan tich CIMT/LI-MA, visualization
 
 - Name/GitHub: ducnguyentrungai
 - Email: ducnguyentrungai@gmail.com
-- Project: Final project for Image Processing course
+- Project: Project for Image Processing
 
 ## Bai bao va bo du lieu tham khao
 
 - 2021 - Carotid Ultrasound Boundary Study (CUBS): An Open Multicenter Analysis of Computerized Intima-Media Thickness Measurement Systems and Their Clinical Impact.
+
   - Article DOI: https://doi.org/10.1016/j.ultrasmedbio.2021.03.022
   - PubMed: https://pubmed.ncbi.nlm.nih.gov/33941415/
   - Dataset DOI: https://doi.org/10.17632/fpv535fss7.1
-
 - 2022 - Carotid Ultrasound Boundary Study (CUBS): Technical considerations on an open multi-center analysis of computerized measurement systems for intima-media thickness measurement on common carotid artery longitudinal B-mode ultrasound scans.
+
   - Article DOI: https://doi.org/10.1016/j.compbiomed.2022.105333
   - PubMed: https://pubmed.ncbi.nlm.nih.gov/35279425/
   - Dataset DOI: https://doi.org/10.17632/m7ndn58sv6.1
