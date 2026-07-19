@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw
+from streamlit_image_coordinates import streamlit_image_coordinates
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -20,6 +21,9 @@ INPUT_SIZE = 256
 class PredictionResult:
     original_image: Image.Image
     original_shape: tuple[int, int]
+    prompt_points: tuple[tuple[int, int], tuple[int, int]]
+    roi_bbox: tuple[int, int, int, int]
+    roi_image: Image.Image
     resized_image: Image.Image
     prob_256: np.ndarray
     pred_mask_256: np.ndarray
@@ -92,6 +96,122 @@ def to_uint8_array(image: Image.Image) -> np.ndarray:
     return np.clip(arr / max_value * 255.0, 0, 255).astype(np.uint8)
 
 
+def click_to_original_point(
+    click: dict,
+    image_size: tuple[int, int],
+) -> tuple[int, int] | None:
+    """Doi toa do tren anh hien thi ve toa do pixel cua anh original."""
+    image_width, image_height = image_size
+    display_width = click.get("width")
+    display_height = click.get("height")
+    if not display_width or not display_height:
+        return None
+
+    x = round(float(click["x"]) * image_width / float(display_width))
+    y = round(float(click["y"]) * image_height / float(display_height))
+    x = int(np.clip(x, 0, image_width - 1))
+    y = int(np.clip(y, 0, image_height - 1))
+    return x, y
+
+
+def points_to_full_height_roi(
+    points: list[tuple[int, int]],
+    image_size: tuple[int, int],
+) -> tuple[int, int, int, int] | None:
+    """Tao ROI tu A den B theo chieu ngang va giu nguyen chieu cao anh."""
+    if len(points) != 2:
+        return None
+    width, height = image_size
+    left = min(points[0][0], points[1][0])
+    right = min(width, max(points[0][0], points[1][0]) + 1)
+    if right - left < 2:
+        return None
+    return left, 0, right, height
+
+
+def draw_ab_prompt(
+    image: Image.Image,
+    points: list[tuple[int, int]],
+) -> Image.Image:
+    canvas = image.convert("RGB")
+    draw = ImageDraw.Draw(canvas)
+    height = canvas.height
+    line_width = max(2, round(min(canvas.size) / 300))
+    radius = max(5, round(min(canvas.size) / 80))
+    colors = ((0, 229, 255), (255, 184, 0))
+
+    for index, (x, y) in enumerate(points[:2]):
+        color = colors[index]
+        draw.line((x, 0, x, height - 1), fill=color, width=line_width)
+        draw.ellipse(
+            (x - radius, y - radius, x + radius, y + radius),
+            fill=color,
+            outline=(255, 255, 255),
+            width=line_width,
+        )
+        draw.text((x + radius + 2, max(0, y - radius)), "AB"[index], fill=color)
+    return canvas
+
+
+def render_point_selector(
+    image: Image.Image,
+    file_key: str,
+) -> tuple[int, int, int, int] | None:
+    st.subheader("Chon hai diem A - B")
+    points = list(st.session_state.get("ab_points", []))
+    if not points:
+        st.info("Bam diem thu nhat de dat diem A.")
+    elif len(points) == 1:
+        st.info("Da co diem A. Bam diem thu hai de dat diem B.")
+    else:
+        st.success("Da chon du hai diem A va B.")
+
+    prompt_revision = st.session_state.get("point_prompt_revision", 0)
+    click = streamlit_image_coordinates(
+        draw_ab_prompt(image, points),
+        key=f"point_prompt_{file_key}_{prompt_revision}",
+        use_column_width="always",
+        cursor="crosshair",
+    )
+
+    if click is not None and len(points) < 2:
+        click_id = click.get("unix_time")
+        if click_id != st.session_state.get("last_point_click_id"):
+            point = click_to_original_point(click, image.size)
+            if point is not None:
+                points.append(point)
+                st.session_state["ab_points"] = points
+                st.session_state["last_point_click_id"] = click_id
+                st.session_state.pop("prediction_result", None)
+                st.rerun()
+
+    reset_col, info_col = st.columns([1, 2])
+    if reset_col.button("Xoa A-B va cham lai", use_container_width=True):
+        st.session_state.pop("ab_points", None)
+        st.session_state.pop("last_point_click_id", None)
+        st.session_state.pop("prediction_result", None)
+        st.session_state["point_prompt_revision"] = prompt_revision + 1
+        st.rerun()
+
+    roi_bbox = points_to_full_height_roi(points, image.size)
+    if len(points) == 2:
+        point_a, point_b = points
+        info_col.write(f"A = {point_a}; B = {point_b}")
+        if roi_bbox is None:
+            st.warning("A va B co cung hoanh do. Hay cham lai hai diem cach nhau.")
+        else:
+            left, _, right, height = roi_bbox
+            info_col.success(
+                f"Vung cat: x={left}:{right}, giu nguyen chieu cao {height}px"
+            )
+            st.image(
+                image.crop(roi_bbox),
+                caption=f"Anh cat A -> B se duoc resize thanh {INPUT_SIZE} x {INPUT_SIZE}",
+                width="stretch",
+            )
+    return roi_bbox
+
+
 def largest_component(mask: np.ndarray) -> np.ndarray:
     mask_uint8 = (mask > 0).astype(np.uint8)
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
@@ -149,6 +269,8 @@ def cached_model():
 
 def predict_unetplusplus(
     image: Image.Image,
+    roi_bbox: tuple[int, int, int, int],
+    prompt_points: tuple[tuple[int, int], tuple[int, int]],
     threshold: float,
     keep_largest: bool,
 ) -> PredictionResult:
@@ -159,8 +281,13 @@ def predict_unetplusplus(
     original_shape = (original_height, original_width)
 
     original_arr = to_uint8_array(original)
+    left, top, right, bottom = roi_bbox
+    if not (0 <= left < right <= original_width and 0 <= top < bottom <= original_height):
+        raise ValueError("Vung ROI khong hop le hoac nam ngoai anh goc.")
+
+    roi_arr = original_arr[top:bottom, left:right]
     resized_arr = cv2.resize(
-        original_arr,
+        roi_arr,
         (INPUT_SIZE, INPUT_SIZE),
         interpolation=cv2.INTER_LINEAR,
     )
@@ -179,16 +306,25 @@ def predict_unetplusplus(
     if keep_largest:
         pred_mask_256 = largest_component(pred_mask_256)
 
-    prob_orig = cv2.resize(
+    roi_width = right - left
+    roi_height = bottom - top
+    prob_roi = cv2.resize(
         prob_256,
-        (original_width, original_height),
+        (roi_width, roi_height),
         interpolation=cv2.INTER_LINEAR,
     )
-    pred_mask_orig = cv2.resize(
+    pred_mask_roi = cv2.resize(
         pred_mask_256.astype(np.uint8),
-        (original_width, original_height),
+        (roi_width, roi_height),
         interpolation=cv2.INTER_NEAREST,
     ).astype(bool)
+
+    # Dua ket qua tu ROI ve dung toa do tren anh original. Cac pixel ngoai ROI
+    # khong tham gia du doan va duoc gan probability/mask bang 0.
+    prob_orig = np.zeros(original_shape, dtype=np.float32)
+    pred_mask_orig = np.zeros(original_shape, dtype=bool)
+    prob_orig[top:bottom, left:right] = prob_roi
+    pred_mask_orig[top:bottom, left:right] = pred_mask_roi
     if keep_largest:
         pred_mask_orig = largest_component(pred_mask_orig)
 
@@ -200,13 +336,16 @@ def predict_unetplusplus(
     return PredictionResult(
         original_image=original,
         original_shape=original_shape,
+        prompt_points=prompt_points,
         resized_image=Image.fromarray(resized_arr),
         prob_256=prob_256,
         pred_mask_256=pred_mask_256,
         prob_orig=prob_orig,
         pred_mask_orig=pred_mask_orig,
         mask_confidence=mask_confidence,
-        global_confidence=float(np.mean(prob_orig)),
+        roi_bbox=roi_bbox,
+        roi_image=Image.fromarray(roi_arr),
+        global_confidence=float(np.mean(prob_roi)),
     )
 
 
@@ -427,7 +566,11 @@ def render_sidebar() -> tuple[float, float, bool]:
 
 
 def render_pipeline_summary(result: PredictionResult) -> None:
-    st.metric("Mask confidence", f"{result.mask_confidence * 100:.2f}%")
+    left, top, right, bottom = result.roi_bbox
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Mask confidence", f"{result.mask_confidence * 100:.2f}%")
+    c2.metric("ROI tren anh goc", f"{right - left} x {bottom - top} px")
+    c3.metric("Input mo hinh", f"{INPUT_SIZE} x {INPUT_SIZE} px")
 
 
 def render_prediction_views(result: PredictionResult, boundary: BoundaryResult) -> None:
@@ -435,23 +578,27 @@ def render_prediction_views(result: PredictionResult, boundary: BoundaryResult) 
     mask_pred_orig_image = Image.fromarray((result.pred_mask_orig.astype(np.uint8) * 255))
     columns = st.columns(4)
     columns[0].image(
-        result.original_image,
-        caption="Anh goc",
+        draw_ab_prompt(result.original_image, list(result.prompt_points)),
+        caption="Anh goc va hai diem A-B",
         use_container_width=True,
     )
     columns[1].image(
-        mask_pred_orig_image,
-        caption="Anh mask da chuyen ve anh goc",
+        result.resized_image,
+        caption="ROI dau vao mo hinh (256 x 256)",
         use_container_width=True,
     )
     columns[2].image(
-        mask_overlay(result.original_image, result.pred_mask_orig),
-        caption="Overlay",
+        mask_pred_orig_image,
+        caption="Mask da dat lai dung vi tri tren anh goc",
         use_container_width=True,
     )
+    overlay_with_boundaries = draw_boundaries(
+        mask_overlay(result.original_image, result.pred_mask_orig),
+        boundary,
+    )
     columns[3].image(
-        draw_boundaries(result.original_image, boundary),
-        caption="LI cyan, MA vang tren mask_pred_orig",
+        draw_ab_prompt(overlay_with_boundaries, list(result.prompt_points)),
+        caption="Ket qua tren anh goc: mask, LI cyan, MA vang",
         use_container_width=True,
     )
 
@@ -599,20 +746,40 @@ def main() -> None:
     if image_file is None:
         st.session_state.pop("prediction_result", None)
         st.session_state.pop("prediction_file_key", None)
+        st.session_state.pop("ab_points", None)
+        st.session_state.pop("last_point_click_id", None)
+        st.session_state.pop("point_prompt_revision", None)
         st.info("Hay upload anh de bat dau pipeline.")
         return
     
     file_key = f"{image_file.name}_{image_file.size}"
     if st.session_state.get("prediction_file_key") != file_key:
         st.session_state.pop("prediction_result", None)
+        st.session_state.pop("ab_points", None)
+        st.session_state.pop("last_point_click_id", None)
+        st.session_state["point_prompt_revision"] = 0
         st.session_state["prediction_file_key"] = file_key
 
-    if st.button("Thuc hien", type="primary", use_container_width=True):
+    try:
+        image = load_uploaded_image(image_file)
+    except Exception as exc:
+        st.error(f"Khong the doc anh: {exc}")
+        return
+
+    roi_bbox = render_point_selector(image, file_key)
+
+    if st.button(
+        "Thuc hien du doan tren vung A-B",
+        type="primary",
+        use_container_width=True,
+        disabled=roi_bbox is None,
+    ):
         try:
-            image = load_uploaded_image(image_file)
             with st.spinner("Dang chay Unet++ tren anh resize 256 x 256..."):
                 st.session_state["prediction_result"] = predict_unetplusplus(
                     image,
+                    roi_bbox,
+                    tuple(st.session_state["ab_points"]),
                     threshold,
                     keep_largest,
                 )
@@ -621,10 +788,20 @@ def main() -> None:
             st.stop()
 
     if "prediction_result" not in st.session_state:
-        st.info("Nhan nut Thuc hien de bat dau du doan.")
+        if roi_bbox is not None:
+            st.info("Nhan nut Thuc hien du doan tren vung A-B de bat dau.")
         return
 
     result = st.session_state["prediction_result"]
+    current_points = tuple(st.session_state.get("ab_points", []))
+    if (
+        not hasattr(result, "prompt_points")
+        or result.roi_bbox != roi_bbox
+        or result.prompt_points != current_points
+    ):
+        st.session_state.pop("prediction_result", None)
+        st.info("Hai diem A-B da thay doi. Hay chay lai du doan.")
+        return
 
     boundary = boundary_from_mask(result.pred_mask_orig, um_per_pixel)
     render_pipeline_summary(result)
